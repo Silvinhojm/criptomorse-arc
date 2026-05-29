@@ -15,6 +15,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Criptomorse",
   description: "Banking-grade stablecoin wallet on Arc Testnet with ERC-8183 agentic jobs",
+  other: {
+    "talentapp:project_verification": "a86bc5b3e4d61bf1baa1f88217333e7dcaf25934351cef9a9b037e22466fe7049c25ee38126b03e9defdd447e2c644af75d4af21c"
+  }
 };
 
 export default function RootLayout({
@@ -23,13 +26,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <head>
-        <meta name="talentapp:project_verification" content="a86bc5b3e4d61bf1baa1f88217333e7dcaf25934351cef9a9b037e22466fe7049c25ee38126b03e9defdd447e2c644af75d4af21c" />
-      </head>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
