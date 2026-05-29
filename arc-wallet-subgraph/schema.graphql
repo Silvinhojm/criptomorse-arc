@@ -1,0 +1,32 @@
+type Job @entity {
+  id: ID!
+  client: Bytes!
+  provider: Bytes!
+  evaluator: Bytes!
+  description: String!
+  budget: BigInt!
+  expiredAt: BigInt!
+  status: String!
+  hook: Bytes!
+  createdAt: BigInt!
+  createdTx: Bytes!
+  updatedAt: BigInt!
+  activities: [JobActivity!]! @derivedFrom(field: "job")
+}
+type JobActivity @entity {
+  id: ID!
+  job: Job!
+  action: String!
+  actor: Bytes!
+  reason: Bytes
+  deliverable: Bytes
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+type GlobalStats @entity {
+  id: ID!
+  totalJobs: BigInt!
+  totalFunded: BigInt!
+  totalCompleted: BigInt!
+  totalRejected: BigInt!
+}

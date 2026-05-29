@@ -1,34 +1,32 @@
-import { kit, adapter } from "../../../lib/arc";
-
 export async function POST(req) {
   try {
     const body = await req.json();
-    console.log("BODY:", body);
 
     const { to, amount } = body;
 
-    const result = await kit.send({
-      from: { adapter, chain: "Arc_Testnet" },
-      to,
-      amount,
-      token: "USDC",
+    console.log("BODY:", body);
+
+    // validações simples
+    if (!to || !amount) {
+      return new Response(
+        JSON.stringify({ error: "Faltando dados" }),
+        { status: 400 }
+      );
+    }
+
+    // aqui futuramente entra a blockchain
+    console.log("Enviando", amount, "para", to);
+
+    return Response.json({
+      success: true,
+      message: "Simulação de envio OK",
     });
-
-    console.log("RESULT:", result);
-
-    return new Response(JSON.stringify(result), {
-      status: 200,
-    });
-
   } catch (err) {
-    console.error("ERRO REAL:", err); // 🔥 MOSTRA O ERRO DE VERDADE
+    console.error("ERRO NO SEND:", err);
 
-    return new Response(JSON.stringify({
-      error: err.message,
-      full: String(err)
-    }), {
-      status: 500,
-    });
+    return new Response(
+      JSON.stringify({ error: err.message }),
+      { status: 500 }
+    );
   }
 }
-``

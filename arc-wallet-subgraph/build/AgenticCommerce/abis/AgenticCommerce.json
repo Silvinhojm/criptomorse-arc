@@ -1,0 +1,127 @@
+[
+  {
+    "type": "event",
+    "name": "JobCreated",
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "name": "jobId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "name": "client",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "name": "provider",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "evaluator",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "expiredAt",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "name": "hook",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "JobFunded",
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "name": "jobId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "name": "client",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "amount",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "JobSubmitted",
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "name": "jobId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "name": "provider",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "deliverable",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "JobCompleted",
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "name": "jobId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "name": "evaluator",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "reason",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "JobRejected",
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "name": "jobId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "name": "evaluator",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "name": "reason",
+        "type": "bytes32"
+      }
+    ]
+  }
+]
