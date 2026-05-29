@@ -16,6 +16,7 @@
     "react-hot-toast": "^2.4.1"
   },
   "devDependencies": {
+    "@graphprotocol/graph-ts": "^0.38.2",
     "@tailwindcss/postcss": "^4.3.0",
     "@types/node": "^20",
     "@types/react": "^19",
