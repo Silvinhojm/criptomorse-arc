@@ -1,432 +1,692 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
 import { Toaster, toast } from "react-hot-toast";
 
-
 declare global {
-  interface Window { ethereum?: any; }
+  interface Window {
+    ethereum?: any;
+  }
 }
 
-const ARC_CHAIN_ID    = "0x491";
-const RPC_URL         = "https://rpc.testnet.arc.network";
-const USDC_ADDRESS    = "0x3600000000000000000000000000000000000000";
-const EURC_ADDRESS    = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
-const ERC8183_ADDRESS = "0x0747EEf0706327138c69792bF28Cd525089e4583";
-const GOLDSKY_URL     = "https://api.goldsky.com/api/public/project_cmpngw40w7ra701wo7299675h/subgraphs/arc-erc8183/1.0.0/gn";
+/* ── Chain config ─────────────────────────────────────────── */
+const ARC_CHAIN_ID = "0x491";
+const RPC_URL      = "https://rpc.testnet.arc.network";
 
-const BLUE   = "#3a6cc8";
-const ORANGE = "#e05a3a";
-const BORDER = "#c8cdd8";
-const short  = (a: string) => a ? a.slice(0, 6) + "..." + a.slice(-4) : "";
+const USDC_ADDRESS = "0x3600000000000000000000000000000000000000";
+const EURC_ADDRESS = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
 
 const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
   "function balanceOf(address owner) view returns (uint256)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-];
-const ERC8183_ABI = [
-  "function createJob(address provider, address evaluator, uint256 expiredAt, string description, address hook) returns (uint256)",
-  "function fund(uint256 jobId, bytes optParams)",
-  "function submit(uint256 jobId, bytes32 deliverable, bytes optParams)",
 ];
 
-const STATUS_COLORS: Record<string, string> = {
-  Open: "#6b7280", Funded: "#2775CA", Submitted: "#e05a3a",
-  Completed: "#16a34a", Rejected: "#dc2626", Expired: "#9ca3af",
+const TOKENS: Record<string, { address: string; decimals: number; color: string }> = {
+  USDC: { address: USDC_ADDRESS, decimals: 6, color: "#2775CA" },
+  EURC: { address: EURC_ADDRESS, decimals: 6, color: "#1A56DB" },
 };
 
-async function fetchJobsFromGoldsky(address: string): Promise<any[]> {
-  try {
-    const addr  = address.toLowerCase();
-    const query = `{
-      asClient: jobs(where:{client:"${addr}"},orderBy:createdAt,orderDirection:desc,first:20){
-        id status budget description provider evaluator expiredAt createdAt updatedAt
+/* ── Types ────────────────────────────────────────────────── */
+interface TxRecord {
+  to: string;
+  amount: string;
+  token: string;
+  memo: string;
+  hash: string;
+  timestamp: number;
+}
+
+/* ── Helpers ──────────────────────────────────────────────── */
+const short = (addr: string) => addr.slice(0, 6) + "..." + addr.slice(-4);
+
+const timeAgo = (ts: number) => {
+  const diff = Date.now() - ts;
+  if (diff < 60_000)   return "agora";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min atrás`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h atrás`;
+  return new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+};
+
+/* ══════════════════════════════════════════════════════════ */
+export default function Home() {
+  const [account,  setAccount]  = useState("");
+  const [balances, setBalances] = useState<Record<string, string>>({ USDC: "0.00", EURC: "0.00" });
+  const [to,       setTo]       = useState("");
+  const [amount,   setAmount]   = useState("");
+  const [token,    setToken]    = useState("USDC");
+  const [memo,     setMemo]     = useState("");
+  const [fee,      setFee]      = useState("0.0000");
+  const [loading,  setLoading]  = useState(false);
+  const [txHash,   setTxHash]   = useState("");
+  const [history,  setHistory]  = useState<TxRecord[]>([]);
+  const [tab,      setTab]      = useState<"send" | "history">("send");
+
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+
+  /* ── Fetch balances ──────────────────────────────────── */
+  const fetchBalances = useCallback(async (addr: string) => {
+    try {
+      const results: Record<string, string> = {};
+      for (const [symbol, cfg] of Object.entries(TOKENS)) {
+        const contract = new ethers.Contract(cfg.address, ERC20_ABI, provider);
+        const raw      = await contract.balanceOf(addr);
+        const fmt      = ethers.formatUnits(raw, cfg.decimals);
+        results[symbol] = Number(fmt).toLocaleString("pt-BR", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 6,
+        });
       }
-      asProvider: jobs(where:{provider:"${addr}"},orderBy:createdAt,orderDirection:desc,first:20){
-        id status budget description provider evaluator expiredAt createdAt updatedAt
+      setBalances(results);
+    } catch {
+      /* silently ignore */
+    }
+  }, []);
+
+  /* ── Init ────────────────────────────────────────────── */
+  useEffect(() => {
+    if (!window.ethereum) return;
+    window.ethereum.request({ method: "eth_accounts" }).then((accounts: string[]) => {
+      if (accounts[0]) { setAccount(accounts[0]); fetchBalances(accounts[0]); }
+    });
+    window.ethereum.on("accountsChanged", (accounts: string[]) => {
+      setAccount(accounts[0] || "");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (account) fetchBalances(account);
+  }, [account]);
+
+  /* ── Switch chain ────────────────────────────────────── */
+  const switchToArc = async () => {
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: ARC_CHAIN_ID }],
+      });
+    } catch (err: any) {
+      if (err.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: ARC_CHAIN_ID,
+            chainName: "Arc Testnet",
+            nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
+            rpcUrls: [RPC_URL],
+            blockExplorerUrls: ["https://testnet.arcscan.app"],
+          }],
+        });
       }
-    }`;
-    const res  = await fetch(GOLDSKY_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
-    const data = await res.json();
-    if (data.errors) return [];
-    const all  = [...(data.data?.asClient || []), ...(data.data?.asProvider || [])];
-    const seen = new Set<string>();
-    return all
-      .filter(j => { if (seen.has(j.id)) return false; seen.add(j.id); return true; })
-      .map(j => ({ ...j, statusName: j.status, budget: BigInt(j.budget || "0") }));
-  } catch { return []; }
-}
+    }
+  };
 
-function QRCode({ value, size = 180 }: { value: string; size?: number }) {
-  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(value)}&bgcolor=ffffff&color=1a1a2e&margin=10`;
-  return (
-    <div style={{ display: "flex", justifyContent: "center", margin: "12px 0" }}>
-      <img src={url} alt="QR Code" width={size} height={size}
-        style={{ borderRadius: 12, border: "3px solid #e2e8f0", boxShadow: "0 2px 12px rgba(0,0,0,0.1)" }} />
-    </div>
-  );
-}
+  /* ── Connect ─────────────────────────────────────────── */
+  const connectWallet = async () => {
+    if (!window.ethereum) { toast.error("Instale a MetaMask"); return; }
+    await switchToArc();
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    setAccount(accounts[0]);
+    toast.success("Carteira conectada!");
+  };
 
-function ReceiveModal({ account, onClose }: { account: string; onClose: () => void }) {
-  const copy = () => { navigator.clipboard.writeText(account); toast.success("Endereço copiado!"); };
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ background: "#f2f3f5", borderRadius: 20, padding: 24, width: 340 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-          <h3 style={{ margin: 0 }}>Receber USDC</h3>
-          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#6b7280" }}>×</button>
-        </div>
-        <p style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>Escaneie o QR code ou copie o endereço</p>
-        <QRCode value={account} size={200} />
-        <div style={{ background: "#fff", borderRadius: 10, padding: "10px 12px", marginBottom: 12, wordBreak: "break-all", fontFamily: "monospace", fontSize: 11, color: "#374151", border: "1px solid #e2e8f0" }}>
-          {account}
-        </div>
-        <button onClick={copy} style={{ width: "100%", background: BLUE, color: "#fff", padding: 12, borderRadius: 12, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 14 }}>
-          📋 Copiar endereço
-        </button>
-      </div>
-    </div>
-  );
-}
+  /* ── Estimate fee ────────────────────────────────────── */
+  useEffect(() => {
+    if (!to || !amount || !account) { setFee("0.0000"); return; }
+    (async () => {
+      try {
+        const bp      = new ethers.BrowserProvider(window.ethereum);
+        const signer  = await bp.getSigner();
+        const cfg     = TOKENS[token];
+        const contract = new ethers.Contract(cfg.address, ERC20_ABI, signer);
+        const value   = ethers.parseUnits(amount, cfg.decimals);
+        const gas     = await contract.transfer.estimateGas(ethers.getAddress(to), value);
+        const feeData = await bp.getFeeData();
+        const gasPrice = feeData.gasPrice ?? ethers.parseUnits("20", "gwei");
+        const total   = gas * gasPrice;
+        setFee(Number(ethers.formatUnits(total, 18)).toFixed(4));
+      } catch {
+        setFee("0.0000");
+      }
+    })();
+  }, [amount, to, token, account]);
 
-// ─── SwapModal com LI.FI Widget oficial ──────────────────────────────────────
-// ─── SwapModal com LI.FI Widget oficial ──────────────────────────────────────
-// ─── SwapModal via LI.FI Widget (iframe) ─────────────────────────────────────
-// ─── SwapModal abre LI.FI Widget em nova aba ─────────────────────────────────
-function SwapModal({ account, onClose }: { account: string; onClose: () => void }) {
-  const url = `https://widget.li.fi/home?toChain=1169&toToken=0x3600000000000000000000000000000000000000&integrator=arcflow-criptomorse${account ? `&toAddress=${account}` : ""}`;
+  /* ── Send ────────────────────────────────────────────── */
+  const send = async () => {
+    if (!ethers.isAddress(to))  { toast.error("Endereço inválido"); return; }
+    if (!amount || Number(amount) <= 0) { toast.error("Informe um valor"); return; }
 
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ background: "#f2f3f5", borderRadius: 20, padding: 28, width: 360, textAlign: "center" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-          <h3 style={{ margin: 0 }}>🔄 Trocar tokens</h3>
-          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#6b7280" }}>×</button>
-        </div>
-
-        {/* Rota visual */}
-        <div style={{ background: "#fff", borderRadius: 14, padding: "14px 20px", marginBottom: 20, border: "1px solid #e2e8f0" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 24 }}>💵</div>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>USDC</div>
-              <div style={{ fontSize: 11, color: "#6b7280" }}>Qualquer rede</div>
-            </div>
-            <div style={{ fontSize: 22, color: BLUE }}>→</div>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 24 }}>🔵</div>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>USDC</div>
-              <div style={{ fontSize: 11, color: "#6b7280" }}>Arc Testnet</div>
-            </div>
-          </div>
-        </div>
-
-        <p style={{ fontSize: 12, color: "#6b7280", marginBottom: 20 }}>
-          O widget LI.FI abrirá em nova aba com Arc Testnet já selecionado como destino.
-          {account && <><br/><span style={{ color: BLUE, fontFamily: "monospace" }}>→ {short(account)}</span></>}
-        </p>
-
-        <button
-          onClick={() => { window.open(url, "_blank"); onClose(); }}
-          style={{ width: "100%", background: BLUE, color: "#fff", padding: 13, borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 15, marginBottom: 10 }}>
-          Abrir LI.FI Widget ↗
-        </button>
-        <button onClick={onClose}
-          style={{ width: "100%", background: "#e5e7eb", color: "#374151", padding: 11, borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 600 }}>
-          Cancelar
-        </button>
-
-        <p style={{ fontSize: 10, color: "#9ca3af", marginTop: 12, marginBottom: 0 }}>
-          Powered by LI.FI · Cross-chain routing
-        </p>
-      </div>
-    </div>
-  );
-}
-// ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-function CreateJobModal({ account, onClose, onCreated }: { account: string; onClose: () => void; onCreated: () => void }) {
-  const [provider, setProvider]       = useState("");
-  const [description, setDescription] = useState("");
-  const [budget, setBudget]           = useState("");
-  const [loading, setLoading]         = useState(false);
-
-  const create = async () => {
-    if (!provider || !description || !budget) { toast.error("Preencha todos os campos"); return; }
     setLoading(true);
     try {
-      const web3Provider = new ethers.BrowserProvider(window.ethereum);
-      const signer       = await web3Provider.getSigner();
-      const usdc         = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, signer);
-      const erc8183      = new ethers.Contract(ERC8183_ADDRESS, ERC8183_ABI, signer);
-      const amt          = ethers.parseUnits(budget, 6);
-      const expiredAt    = Math.floor(Date.now() / 1000) + 86400 * 7;
-      toast.loading("Aprovando USDC...", { id: "job" });
-      const approveTx = await usdc.approve(ERC8183_ADDRESS, amt);
-      await approveTx.wait();
-      toast.loading("Criando Job...", { id: "job" });
-      const tx = await erc8183.createJob(provider, account, expiredAt, description, ethers.ZeroAddress);
+      const bp      = new ethers.BrowserProvider(window.ethereum);
+      const signer  = await bp.getSigner();
+      const cfg     = TOKENS[token];
+      const contract = new ethers.Contract(cfg.address, ERC20_ABI, signer);
+      const value   = ethers.parseUnits(amount, cfg.decimals);
+
+      const tx = await contract.transfer(ethers.getAddress(to), value, {
+        maxFeePerGas:         ethers.parseUnits("20", "gwei"),
+        maxPriorityFeePerGas: ethers.parseUnits("1",  "gwei"),
+      });
+
+      setTxHash(tx.hash);
+      toast.loading("Enviando...", { id: "tx" });
       await tx.wait();
-      toast.success("Job criado!", { id: "job" });
-      onCreated();
-      onClose();
-    } catch (e: any) {
-      toast.error(e?.reason || "Erro ao criar job", { id: "job" });
-    }
-    setLoading(false);
-  };
+      toast.success("Transferência concluída!", { id: "tx" });
 
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ background: "#f2f3f5", borderRadius: 20, padding: 24, width: 360 }}>
-        <button onClick={onClose} style={{ float: "right", background: "none", border: "none", fontSize: 20, cursor: "pointer" }}>×</button>
-        <h3 style={{ marginBottom: 16 }}>Criar Job ERC-8183</h3>
-        <input placeholder="Provider (0x...)" value={provider} onChange={e => setProvider(e.target.value)}
-          style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginBottom: 10, boxSizing: "border-box" }} />
-        <input placeholder="Descrição do job" value={description} onChange={e => setDescription(e.target.value)}
-          style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginBottom: 10, boxSizing: "border-box" }} />
-        <input placeholder="Budget (USDC)" type="number" value={budget} onChange={e => setBudget(e.target.value)}
-          style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginBottom: 14, boxSizing: "border-box" }} />
-        <button onClick={create} disabled={loading}
-          style={{ width: "100%", background: ORANGE, color: "#fff", padding: 12, borderRadius: 12, border: "none", cursor: "pointer", fontWeight: 600 }}>
-          {loading ? "Processando..." : "Criar Job"}
-        </button>
-      </div>
-    </div>
-  );
-}
+      setHistory(prev => [{
+        to, amount, token, memo,
+        hash: tx.hash,
+        timestamp: Date.now(),
+      }, ...prev]);
 
-function JobCard({ job }: { job: any }) {
-  const color = STATUS_COLORS[job.statusName] || "#6b7280";
-  return (
-    <div style={{ background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ fontSize: 12, color: "#9ca3af" }}>Job #{job.id?.slice(-5)}</span>
-        <span style={{ fontSize: 11, background: color + "22", color, padding: "2px 8px", borderRadius: 8, fontWeight: 600 }}>{job.statusName}</span>
-      </div>
-      <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>{job.description || "(sem descrição)"}</div>
-      <div style={{ fontSize: 11, color: "#6b7280" }}>
-        🔥 {ethers.formatUnits(job.budget || 0, 6)} USDC &nbsp;·&nbsp;
-        👤 Provider: {short(job.provider || "")}
-      </div>
-      <a href={`https://explorer.testnet.arc.network/tx/${job.id}`} target="_blank" rel="noreferrer"
-        style={{ fontSize: 11, color: BLUE, textDecoration: "none", display: "inline-block", marginTop: 6 }}>🔍 ArcScan</a>
-    </div>
-  );
-}
-
-export default function Home() {
-  const [account, setAccount]         = useState("");
-  const [usdcBal, setUsdcBal]         = useState(0n);
-  const [eurcBal, setEurcBal]         = useState(0n);
-  const [tab, setTab]                 = useState<"send"|"history"|"jobs">("send");
-  const [modal, setModal]             = useState<""|"receive"|"swap"|"createJob">("");
-  const [jobs, setJobs]               = useState<any[]>([]);
-  const [history, setHistory]         = useState<any[]>([]);
-  const [loadingJobs, setLoadingJobs] = useState(false);
-  const [dest, setDest]               = useState("");
-  const [amount, setAmount]           = useState("");
-  const [token, setToken]             = useState<"USDC"|"EURC">("USDC");
-  const [memo, setMemo]               = useState("");
-  const [sending, setSending]         = useState(false);
-
-  const loadBalances = useCallback(async (addr: string) => {
-    try {
-      const provider = new ethers.JsonRpcProvider(RPC_URL);
-      const usdc     = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, provider);
-      const eurc     = new ethers.Contract(EURC_ADDRESS, ERC20_ABI, provider);
-      const [u, e]   = await Promise.all([usdc.balanceOf(addr), eurc.balanceOf(addr)]);
-      setUsdcBal(u);
-      setEurcBal(e);
-    } catch {}
-  }, []);
-
-  const loadJobs = useCallback(async (addr: string) => {
-    setLoadingJobs(true);
-    const data = await fetchJobsFromGoldsky(addr);
-    setJobs(data);
-    setLoadingJobs(false);
-  }, []);
-
-  const connect = async () => {
-    if (!window.ethereum) { toast.error("MetaMask não encontrado"); return; }
-    try {
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      const addr = accounts[0];
-      setAccount(addr);
-      toast.success("Carteira conectada!");
-      await loadBalances(addr);
-      await loadJobs(addr);
-    } catch (e: any) {
-      if (e.code === 4001) {
-        toast.error("Conexão cancelada");
-      } else {
-        toast.error("Erro ao conectar");
-        console.error(e);
-      }
+      setTo(""); setAmount(""); setMemo("");
+      fetchBalances(account);
+    } catch {
+      toast.error("Erro na transação");
+    } finally {
+      setLoading(false);
     }
   };
 
-  const send = async () => {
-    if (!dest || !amount) { toast.error("Preencha destino e valor"); return; }
-    setSending(true);
-    try {
-      const web3Provider = new ethers.BrowserProvider(window.ethereum);
-      const signer       = await web3Provider.getSigner();
-      const addr         = token === "USDC" ? USDC_ADDRESS : EURC_ADDRESS;
-      const contract     = new ethers.Contract(addr, ERC20_ABI, signer);
-      const parsed       = ethers.parseUnits(amount, 6);
-      toast.loading("Enviando...", { id: "send" });
-      const tx = await contract.transfer(dest, parsed);
-      await tx.wait();
-      toast.success("Enviado!", { id: "send" });
-      setHistory(h => [{ hash: tx.hash, to: dest, amount, token, memo, time: new Date().toLocaleTimeString() }, ...h]);
-      setDest(""); setAmount(""); setMemo("");
-      await loadBalances(account);
-    } catch (e: any) {
-      toast.error(e?.reason || "Erro ao enviar", { id: "send" });
-    }
-    setSending(false);
-  };
-
-  const usdcDisplay = parseFloat(ethers.formatUnits(usdcBal, 6)).toFixed(6);
-  const eurcDisplay = parseFloat(ethers.formatUnits(eurcBal, 6)).toFixed(6);
-  const feeEstimate = amount ? (parseFloat(amount) * 0.0001).toFixed(4) : "0.0000";
-
+  /* ── UI ──────────────────────────────────────────────── */
   return (
-    <div style={{ minHeight: "100vh", background: "#eef0f5", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <Toaster position="top-center" />
-      <div style={{ width: 380, borderRadius: 28, overflow: "hidden", boxShadow: "0 8px 40px rgba(0,0,0,0.13)" }}>
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=DM+Mono:wght@400;500&display=swap');
 
-        {/* Header azul */}
-        <div style={{ background: "linear-gradient(135deg, #3a6cc8 0%, #2952a3 100%)", padding: "20px 20px 28px", color: "#fff" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <span style={{ fontSize: 12, background: "rgba(255,255,255,0.15)", padding: "4px 10px", borderRadius: 8 }}>Arc Testnet</span>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+          font-family: 'DM Sans', sans-serif;
+          background: #e8eaf0;
+          min-height: 100vh;
+          display: flex;
+          align-items: flex-start;
+          justify-content: center;
+          padding: 40px 16px;
+        }
+
+        /* ── Phone shell ── */
+        .wallet {
+          width: 380px;
+          background: #f2f3f5;
+          border-radius: 36px;
+          border: 1.5px solid #c4c8d4;
+          overflow: hidden;
+          box-shadow: 0 2px 0 #b0b5c2;
+        }
+
+        /* ── Header ── */
+        .header {
+          background: #3a6cc8;
+          padding: 28px 24px 20px;
+          color: #fff;
+        }
+        .header-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 20px;
+        }
+        .network-badge {
+          font-size: 10px;
+          color: rgba(255,255,255,0.65);
+          background: rgba(255,255,255,0.12);
+          border-radius: 8px;
+          padding: 3px 10px;
+          letter-spacing: .04em;
+        }
+        .addr-pill {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: rgba(255,255,255,0.14);
+          border: 0.5px solid rgba(255,255,255,0.2);
+          border-radius: 20px;
+          padding: 4px 12px;
+          font-size: 12px;
+          font-family: 'DM Mono', monospace;
+          color: rgba(255,255,255,0.9);
+          cursor: pointer;
+          transition: background .15s;
+        }
+        .addr-pill:hover { background: rgba(255,255,255,0.2); }
+        .status-dot {
+          width: 6px; height: 6px;
+          border-radius: 50%;
+          background: #7ee8a2;
+          flex-shrink: 0;
+        }
+
+        /* balance */
+        .balance-wrap { text-align: center; padding: 4px 0 20px; }
+        .balance-label {
+          font-size: 10px;
+          color: rgba(255,255,255,0.55);
+          text-transform: uppercase;
+          letter-spacing: .1em;
+          margin-bottom: 6px;
+        }
+        .balance-amount {
+          font-size: 42px;
+          font-weight: 500;
+          color: #fff;
+          letter-spacing: -1.5px;
+          line-height: 1;
+        }
+        .balance-ticker {
+          font-size: 13px;
+          color: rgba(255,255,255,0.5);
+          margin-top: 4px;
+        }
+
+        /* balance pills row */
+        .balance-tokens {
+          display: flex;
+          gap: 8px;
+          justify-content: center;
+          margin-top: 10px;
+        }
+        .token-pill {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: rgba(255,255,255,0.10);
+          border: 0.5px solid rgba(255,255,255,0.18);
+          border-radius: 20px;
+          padding: 4px 12px;
+          font-size: 11px;
+          color: rgba(255,255,255,0.8);
+        }
+        .token-dot {
+          width: 5px; height: 5px;
+          border-radius: 50%;
+        }
+
+        /* action buttons */
+        .actions-row {
+          display: flex;
+          gap: 8px;
+          margin-top: 20px;
+        }
+        .action-btn {
+          flex: 1;
+          background: rgba(255,255,255,0.12);
+          border: 0.5px solid rgba(255,255,255,0.2);
+          border-radius: 14px;
+          padding: 10px 4px 8px;
+          text-align: center;
+          cursor: pointer;
+          transition: background .15s;
+        }
+        .action-btn:hover { background: rgba(255,255,255,0.2); }
+        .action-btn svg {
+          display: block;
+          margin: 0 auto 4px;
+          color: #fff;
+        }
+        .action-btn span {
+          font-size: 10px;
+          color: rgba(255,255,255,0.65);
+          font-family: 'DM Sans', sans-serif;
+        }
+
+        /* ── Body ── */
+        .body { padding: 20px; }
+
+        /* tab bar */
+        .tab-bar {
+          display: flex;
+          border-bottom: 1px solid #c8cdd8;
+          margin-bottom: 16px;
+        }
+        .tab-item {
+          flex: 1;
+          text-align: center;
+          padding: 8px 0;
+          font-size: 12px;
+          color: #6b7280;
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          margin-bottom: -1px;
+          transition: color .15s, border-color .15s;
+          background: none;
+          border-left: none;
+          border-right: none;
+          border-top: none;
+          font-family: 'DM Sans', sans-serif;
+        }
+        .tab-item.active {
+          color: #3a6cc8;
+          border-bottom-color: #3a6cc8;
+          font-weight: 500;
+        }
+
+        /* form */
+        .field { margin-bottom: 10px; }
+        .field label {
+          display: block;
+          font-size: 11px;
+          color: #6b7280;
+          margin-bottom: 4px;
+          letter-spacing: .02em;
+        }
+        .field input, .field select {
+          width: 100%;
+          background: #fff;
+          border: 1px solid #c8cdd8;
+          border-radius: 10px;
+          padding: 9px 12px;
+          font-size: 13px;
+          font-family: 'DM Sans', sans-serif;
+          color: #111827;
+          outline: none;
+          transition: border-color .15s;
+        }
+        .field input:focus, .field select:focus {
+          border-color: #3a6cc8;
+        }
+        .field input::placeholder { color: #b0b7c3; }
+        .field-row { display: flex; gap: 8px; }
+        .field-row .field { flex: 1; }
+        .field-row .field.token { flex: 0 0 88px; }
+
+        /* fee row */
+        .fee-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 0 4px;
+          font-size: 11px;
+          color: #9ca3af;
+          border-top: 1px solid #e5e7eb;
+        }
+        .fee-row span.val {
+          color: #3a6cc8;
+          font-weight: 500;
+          font-family: 'DM Mono', monospace;
+          font-size: 12px;
+        }
+
+        /* send button */
+        .send-btn {
+          width: 100%;
+          background: #3a6cc8;
+          border: none;
+          border-radius: 12px;
+          padding: 12px;
+          font-size: 14px;
+          font-weight: 500;
+          font-family: 'DM Sans', sans-serif;
+          color: #fff;
+          cursor: pointer;
+          margin-top: 10px;
+          transition: background .15s, transform .1s;
+          letter-spacing: .01em;
+        }
+        .send-btn:hover:not(:disabled) { background: #2f5bb5; }
+        .send-btn:active:not(:disabled) { transform: scale(.98); }
+        .send-btn:disabled { opacity: .6; cursor: not-allowed; }
+
+        /* tx hash link */
+        .tx-link {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          color: #3a6cc8;
+          text-decoration: none;
+          margin-top: 10px;
+          padding: 8px 10px;
+          background: #eef3fc;
+          border-radius: 8px;
+          border: 1px solid #c5d4f0;
+          font-family: 'DM Mono', monospace;
+          word-break: break-all;
+        }
+        .tx-link:hover { background: #dce8fa; }
+
+        /* history */
+        .tx-list { display: flex; flex-direction: column; gap: 8px; }
+        .tx-item {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 12px;
+          background: #fff;
+          border-radius: 12px;
+          border: 1px solid #c8cdd8;
+          text-decoration: none;
+          transition: border-color .15s;
+        }
+        .tx-item:hover { border-color: #3a6cc8; }
+
+        .tx-icon {
+          width: 34px; height: 34px;
+          border-radius: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          font-size: 16px;
+        }
+        .tx-icon.out { background: #fff0ee; color: #e05a3a; }
+        .tx-icon.in  { background: #eef3fc; color: #3a6cc8; }
+
+        .tx-info { flex: 1; min-width: 0; }
+        .tx-addr {
+          font-size: 12px;
+          font-weight: 500;
+          color: #111827;
+          font-family: 'DM Mono', monospace;
+        }
+        .tx-memo {
+          font-size: 10px;
+          color: #9ca3af;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          margin-top: 2px;
+        }
+
+        .tx-right { text-align: right; flex-shrink: 0; }
+        .tx-amount {
+          font-size: 13px;
+          font-weight: 500;
+          font-family: 'DM Mono', monospace;
+        }
+        .tx-amount.out { color: #e05a3a; }
+        .tx-amount.in  { color: #3a6cc8; }
+        .tx-time { font-size: 10px; color: #9ca3af; margin-top: 2px; }
+
+        .empty-state {
+          text-align: center;
+          padding: 32px 0;
+          color: #9ca3af;
+          font-size: 13px;
+        }
+
+        /* connect button */
+        .connect-btn {
+          width: 100%;
+          background: #3a6cc8;
+          border: none;
+          border-radius: 12px;
+          padding: 12px;
+          font-size: 14px;
+          font-weight: 500;
+          font-family: 'DM Sans', sans-serif;
+          color: #fff;
+          cursor: pointer;
+          margin-top: 20px;
+          transition: background .15s;
+          letter-spacing: .01em;
+        }
+        .connect-btn:hover { background: #2f5bb5; }
+      `}</style>
+
+      <Toaster position="top-center" toastOptions={{ style: { fontFamily: "'DM Sans', sans-serif", fontSize: 13 } }} />
+
+      <div className="wallet">
+
+        {/* ── Header ── */}
+        <div className="header">
+          <div className="header-top">
+            <span className="network-badge">Arc Testnet</span>
             {account ? (
-              <span style={{ fontSize: 12, background: "rgba(255,255,255,0.15)", padding: "4px 10px", borderRadius: 8 }}>🟢 {short(account)}</span>
+              <div className="addr-pill">
+                <span className="status-dot" />
+                {short(account)}
+              </div>
             ) : (
-              <button onClick={connect} style={{ fontSize: 12, background: "rgba(255,255,255,0.25)", color: "#fff", border: "none", padding: "4px 12px", borderRadius: 8, cursor: "pointer" }}>
+              <button className="connect-btn" style={{ marginTop: 0, padding: "4px 14px", width: "auto", fontSize: 12 }} onClick={connectWallet}>
                 Conectar
               </button>
             )}
           </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 4 }}>SALDO DISPONÍVEL</div>
-            <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: -1 }}>{usdcDisplay}</div>
-            <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 14 }}>USDC</div>
-            <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-              <span style={{ fontSize: 12, background: "rgba(255,255,255,0.2)", padding: "4px 12px", borderRadius: 20, border: "1px solid rgba(255,255,255,0.4)" }}>
-                USDC {usdcDisplay}
-              </span>
-              <span style={{ fontSize: 12, background: "rgba(255,255,255,0.1)", padding: "4px 12px", borderRadius: 20 }}>
-                · EURC {eurcDisplay}
-              </span>
-            </div>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-around", marginTop: 20 }}>
-            {[
-              { icon: "✈️", label: "Enviar",  action: () => setTab("send") },
-              { icon: "📥", label: "Receber", action: () => setModal("receive") },
-              { icon: "🔄", label: "Trocar",  action: () => setModal("swap") },
-              { icon: "💼", label: "Jobs",    action: () => setTab("jobs") },
-            ].map(b => (
-              <button key={b.label} onClick={b.action} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 14, padding: "10px 14px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <span style={{ fontSize: 20 }}>{b.icon}</span>
-                <span style={{ fontSize: 11 }}>{b.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
 
-        {/* Tabs */}
-        <div style={{ background: "#fff", padding: "0 20px" }}>
-          <div style={{ display: "flex", borderBottom: `1px solid ${BORDER}` }}>
-            {(["send", "history", "jobs"] as const).map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                flex: 1, padding: "14px 0", border: "none", background: "none", cursor: "pointer",
-                color: tab === t ? BLUE : "#6b7280", fontWeight: tab === t ? 600 : 400,
-                borderBottom: tab === t ? `2px solid ${BLUE}` : "2px solid transparent", fontSize: 13,
-              }}>
-                {t === "send" ? "Transferir" : t === "history" ? `Histórico (${history.length})` : `Jobs (${jobs.length})`}
-              </button>
-            ))}
-          </div>
-        </div>
+          <div className="balance-wrap">
+            <div className="balance-label">saldo disponível</div>
+            <div className="balance-amount">{balances[token]}</div>
+            <div className="balance-ticker">{token}</div>
 
-        {/* Conteúdo das tabs */}
-        <div style={{ background: "#fff", padding: 20, minHeight: 280 }}>
-
-          {tab === "send" && (
-            <div>
-              <label style={{ fontSize: 12, color: "#6b7280" }}>Destino</label>
-              <input value={dest} onChange={e => setDest(e.target.value)} placeholder="0x..."
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginTop: 4, marginBottom: 12, boxSizing: "border-box" }} />
-              <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-                <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: 12, color: "#6b7280" }}>Valor</label>
-                  <input value={amount} onChange={e => setAmount(e.target.value)} type="number" placeholder="0.00"
-                    style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginTop: 4, boxSizing: "border-box" }} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, color: "#6b7280" }}>Token</label>
-                  <select value={token} onChange={e => setToken(e.target.value as any)}
-                    style={{ padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginTop: 4, display: "block" }}>
-                    <option>USDC</option>
-                    <option>EURC</option>
-                  </select>
-                </div>
-              </div>
-              <label style={{ fontSize: 12, color: "#6b7280" }}>Mensagem (opcional)</label>
-              <input value={memo} onChange={e => setMemo(e.target.value)} placeholder="Para que é esse pagamento?"
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: `1px solid ${BORDER}`, marginTop: 4, marginBottom: 12, boxSizing: "border-box" }} />
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#9ca3af", marginBottom: 14 }}>
-                <span>Taxa estimada</span>
-                <span style={{ color: BLUE }}>~{feeEstimate} USDC</span>
-              </div>
-              <button onClick={account ? send : connect} disabled={sending}
-                style={{ width: "100%", background: BLUE, color: "#fff", padding: 13, borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 15 }}>
-                {sending ? "Enviando..." : account ? `Transferir ${token}` : "Conectar carteira"}
-              </button>
-            </div>
-          )}
-
-          {tab === "history" && (
-            <div>
-              {history.length === 0 ? (
-                <div style={{ textAlign: "center", color: "#9ca3af", paddingTop: 40 }}>Nenhuma transação ainda</div>
-              ) : history.map((h, i) => (
-                <div key={i} style={{ background: "#f9fafb", borderRadius: 12, padding: 12, marginBottom: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 13, fontWeight: 500 }}>→ {short(h.to)}</span>
-                    <span style={{ fontSize: 13, color: ORANGE, fontWeight: 600 }}>-{h.amount} {h.token}</span>
-                  </div>
-                  {h.memo && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>{h.memo}</div>}
-                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>{h.time}</div>
+            <div className="balance-tokens">
+              {Object.entries(TOKENS).map(([sym, cfg]) => (
+                <div key={sym} className="token-pill" style={{ cursor: "pointer", opacity: token === sym ? 1 : 0.6 }} onClick={() => setToken(sym)}>
+                  <span className="token-dot" style={{ background: cfg.color }} />
+                  {sym} {balances[sym]}
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="actions-row">
+            {[
+              { label: "Enviar",    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>, action: () => setTab("send") },
+              { label: "Receber",  icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>, action: () => {} },
+              { label: "Trocar",   icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>, action: () => {} },
+              { label: "Histórico", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>, action: () => setTab("history") },
+            ].map(btn => (
+              <div key={btn.label} className="action-btn" onClick={btn.action}>
+                {btn.icon}
+                <span>{btn.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Body ── */}
+        <div className="body">
+          <div className="tab-bar">
+            <button className={`tab-item ${tab === "send" ? "active" : ""}`}    onClick={() => setTab("send")}>Transferir</button>
+            <button className={`tab-item ${tab === "history" ? "active" : ""}`} onClick={() => setTab("history")}>
+              Histórico {history.length > 0 && `(${history.length})`}
+            </button>
+          </div>
+
+          {/* ── Send tab ── */}
+          {tab === "send" && (
+            <>
+              <div className="field">
+                <label>Destino</label>
+                <input
+                  placeholder="0x..."
+                  value={to}
+                  onChange={e => setTo(e.target.value)}
+                  style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}
+                />
+              </div>
+
+              <div className="field-row">
+                <div className="field">
+                  <label>Valor</label>
+                  <input
+                    placeholder="0.00"
+                    value={amount}
+                    onChange={e => setAmount(e.target.value)}
+                    type="number"
+                    min="0"
+                  />
+                </div>
+                <div className="field token">
+                  <label>Token</label>
+                  <select value={token} onChange={e => setToken(e.target.value)}>
+                    {Object.keys(TOKENS).map(sym => <option key={sym}>{sym}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="field">
+                <label>Mensagem (opcional)</label>
+                <input
+                  placeholder="Para que é esse pagamento?"
+                  value={memo}
+                  onChange={e => setMemo(e.target.value)}
+                />
+              </div>
+
+              <div className="fee-row">
+                <span>Taxa estimada</span>
+                <span className="val">~{fee} USDC</span>
+              </div>
+
+              {account ? (
+                <button className="send-btn" onClick={send} disabled={loading}>
+                  {loading ? "Enviando..." : `Transferir ${token}`}
+                </button>
+              ) : (
+                <button className="connect-btn" onClick={connectWallet}>
+                  Conectar carteira
+                </button>
+              )}
+
+              {txHash && (
+                <a
+                  className="tx-link"
+                  href={`https://testnet.arcscan.app/tx/${txHash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  {short(txHash)} — ver no ArcScan
+                </a>
+              )}
+            </>
           )}
 
-          {tab === "jobs" && (
-            <div>
-              <button onClick={() => setModal("createJob")}
-                style={{ width: "100%", background: ORANGE, color: "#fff", padding: 11, borderRadius: 12, border: "none", cursor: "pointer", fontWeight: 600, marginBottom: 14 }}>
-                + Criar novo Job ERC-8183
-              </button>
-              {loadingJobs ? (
-                <div style={{ textAlign: "center", color: "#9ca3af", paddingTop: 20 }}>Carregando jobs...</div>
-              ) : jobs.length === 0 ? (
-                <div style={{ textAlign: "center", color: "#9ca3af", paddingTop: 20 }}>Nenhum job encontrado</div>
-              ) : jobs.map(j => <JobCard key={j.id} job={j} />)}
+          {/* ── History tab ── */}
+          {tab === "history" && (
+            <div className="tx-list">
+              {history.length === 0 ? (
+                <div className="empty-state">Nenhuma transação ainda.</div>
+              ) : (
+                history.map((tx, i) => (
+                  <a
+                    key={i}
+                    className="tx-item"
+                    href={`https://testnet.arcscan.app/tx/${tx.hash}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <div className="tx-icon out">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+                    </div>
+                    <div className="tx-info">
+                      <div className="tx-addr">{short(tx.to)}</div>
+                      {tx.memo && <div className="tx-memo">{tx.memo}</div>}
+                    </div>
+                    <div className="tx-right">
+                      <div className="tx-amount out">-{tx.amount} {tx.token}</div>
+                      <div className="tx-time">{timeAgo(tx.timestamp)}</div>
+                    </div>
+                  </a>
+                ))
+              )}
             </div>
           )}
         </div>
       </div>
-
-      {modal === "receive"   && <ReceiveModal account={account} onClose={() => setModal("")} />}
-      {modal === "swap"      && <SwapModal account={account} onClose={() => setModal("")} />}
-      {modal === "createJob" && <CreateJobModal account={account} onClose={() => setModal("")} onCreated={() => { loadJobs(account); loadBalances(account); }} />}
-    </div>
+    </>
   );
 }
